@@ -1,65 +1,99 @@
 #!/usr/bin/env ruby
 require "fileutils"
-SRV=ARGV[0].strip
-exit! unless ["srv","dyntask"].include? SRV
-CMD={ "srv" => "dyn-srv", "dyntask" => "dyntask-server"}
-FileUtils.mkdir_p File.join(ENV["USERPROFILE"],"dyndoc","log")
-DYN_DAEMON_LOG_FILE = File.join(ENV["USERPROFILE"],"dyndoc","log","win32daemon_")+SRV+".log"
-DYN_DAEMON_DIR = File.dirname `where ruby`.strip
+SRV=(ARGV[0] || "help").strip
+exit! unless ["srv","dyntask","help","status","list"].include? SRV
+CMD={ "srv" => "dyn-srv", "dyntask" => "dyntask-server"}[SRV]
+if CMD
+  FileUtils.mkdir_p File.join(ENV["USERPROFILE"],"dyndoc","log")
+  DYN_DAEMON_LOG_FILE = File.join(ENV["USERPROFILE"],"dyndoc","log","")+CMD+".log"
+  DYN_DAEMON_DIR = File.dirname `where ruby`.strip
+end
 
-require 'win32/daemon'
-require 'win32/process'
-include Win32
+unless RUBY_PLATFORM =~ /mswin|mingw/i
+  puts "Only available for Windows!"
+  exit!
+end
 
-class DynDaemon < Daemon
+case SRV
+when "help"
+  puts <<-DOC
+Service helpers to launch dyn-srv or dyntask daemon.
+Usage:
+dyn-daemon srv|dyntask new|load       => create when not existing the service
+dyn-daemon srv|dyntask delete|unload  => unload existing service
+dyn-daemon srv|dyntask start/stop     => start/stop the service
+dyn-daemon srv|dyntask log            => to watch log files
 
-  def service_init
-    File.open(DYN_DAEMON_LOG_FILE, 'a'){ |f| f.puts "Initializing service #{Time.now}" }
+dyn-daemon status                     => status of dyntask service
+dyn-daemon list                       => echo
+DOC
+when "status"
+  require 'sys/proctable'
+   msg={"dyn-srv" => "","dyntask-server" => ""}
+   msg.keys.each do |srv|
+     Sys::ProcTable.ps{ |s| msg[srv] << "["+s.pid.to_s+"] "+s.cmdline if s.pid != Process.pid and s.cmdline =~ /#{srv}/ }
+   end
+   puts (msg["dyn-srv"].empty? ? "Stopped" : "Running") + "|" + (msg["dyntask-server"].empty? ? "Stopped" : "Running")
+else
 
-    @server_pid = Process.spawn CMD[SRV], :chdir => DYN_DAEMON_DIR, :err => [DYN_DAEMON_LOG_FILE, 'a']
-    File.open(DYN_DAEMON_LOG_FILE, 'a'){ |f| f.puts @server_pid.inspect }
-  end
+  require 'win32/daemon'
+  require 'win32/process'
+  include Win32
 
-  def service_main
-    File.open(DYN_DAEMON_LOG_FILE, 'a'){ |f| f.puts "Service is running #{Time.now} with pid #{@server_pid}" }
-    while running?
-      sleep 10
+  class DynDaemon < Daemon
+
+    def service_init
+      File.open(DYN_DAEMON_LOG_FILE, 'a'){ |f| f.puts "Initializing service #{Time.now}" }
+
+      @server_pid = Process.spawn CMD, :chdir => DYN_DAEMON_DIR, :err => [DYN_DAEMON_LOG_FILE, 'a']
+      File.open(DYN_DAEMON_LOG_FILE, 'a'){ |f| f.puts @server_pid.inspect }
+    end
+
+    def service_main
+      File.open(DYN_DAEMON_LOG_FILE, 'a'){ |f| f.puts "Service is running #{Time.now} with pid #{@server_pid}" }
+      while running?
+        sleep 10
+      end
+    end
+
+    def service_stop
+      File.open(DYN_DAEMON_LOG_FILE, 'a'){ |f| f.puts "Stopping server thread #{Time.now}" }
+      system "taskkill /PID #{@server_pid} /T /F"
+      Process.waitall
+      File.open(DYN_DAEMON_LOG_FILE, 'a'){ |f| f.puts "Service stopped #{Time.now}" }
+      exit!
     end
   end
 
-  def service_stop
-    File.open(DYN_DAEMON_LOG_FILE, 'a'){ |f| f.puts "Stopping server thread #{Time.now}" }
-    system "taskkill /PID #{@server_pid} /T /F"
-    Process.waitall
-    File.open(DYN_DAEMON_LOG_FILE, 'a'){ |f| f.puts "Service stopped #{Time.now}" }
-    exit!
+
+  action = ARGV[1] || "status"
+
+  case action
+  when "start"
+    begin
+      DynDaemon.mainloop
+    rescue Exception => e
+      File.open(DYN_DAEMON_LOG_FILE,'a+'){ |f| f.puts " ***Daemon failure #{Time.now} exception=#{e.inspect}\n#{e.backtrace.join($/)}" }
+      raise
+    end
+  when "stop"
+    require 'sys/proctable'
+
+    pids = []
+
+    Sys::ProcTable.ps{ |s| pids.push(s.pid) if s.cmdline =~ /#{SRV}/ }
+
+    pids -= [Process.pid]
+    unless pids.empty?
+      print "Kill process with pid #{pids.last}"
+      res=Process.kill(9,pids.last)
+      puts " => "+(res == 1 ? "Ok!" : "Failed!")
+    end
+  when "status"
+    require 'sys/proctable'
+    Sys::ProcTable.ps{ |s| puts "["+s.pid.to_s+"] "+s.cmdline if s.pid != Process.pid and s.cmdline =~ /#{SRV}/ }
+  when "log"
+  	puts File.read(DYN_DAEMON_LOG_FILE)
   end
-end
 
-action = ARGV[1] || "status"
-
-case action
-when "start"
-  begin
-    DynDaemon.mainloop
-  rescue Exception => e
-    File.open(DYN_DAEMON_LOG_FILE,'a+'){ |f| f.puts " ***Daemon failure #{Time.now} exception=#{e.inspect}\n#{e.backtrace.join($/)}" }
-    raise
-  end
-when "stop"
-  require 'sys/proctable'
-
-  pids = []
-
-  Sys::ProcTable.ps{ |s| pids.push(s.pid) if s.cmdline =~ /#{SRV}/ }
-
-  pids -= [Process.pid]
-  unless pids.empty?
-    print "Kill process with pid #{pids.last}"
-    res=Process.kill(9,pids.last)
-    puts " => "+(res == 1 ? "Ok!" : "Failed!")
-  end
-when "status"
-  require 'sys/proctable'
-  Sys::ProcTable.ps{ |s| puts "["+s.pid.to_s+"] "+s.cmdline if s.pid != Process.pid and s.cmdline =~ /#{SRV}/ }
 end

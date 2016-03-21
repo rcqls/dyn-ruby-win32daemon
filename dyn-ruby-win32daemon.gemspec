@@ -1,7 +1,7 @@
 require 'rubygems/package_task'
 
 pkg_name='dyn-ruby-win32daemon'
-pkg_version='0.1.0'
+pkg_version='0.1.1'
 
 pkg_files=FileList[
     'bin/*',
